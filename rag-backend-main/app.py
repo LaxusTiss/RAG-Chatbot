@@ -12,6 +12,11 @@ import atexit
 import re
 from dotenv import load_dotenv
 import psutil
+from html.parser import HTMLParser
+from urllib.parse import urljoin, urlparse, urldefrag
+from urllib.request import Request, urlopen
+import ipaddress
+import socket
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
@@ -76,6 +81,13 @@ doc_index = None
 doc_embeddings = None
 doc_texts_current = None
 
+MAX_SITE_PAGES = 5
+MAX_SITE_CHUNKS = 24
+MAX_PAGE_BYTES = 1_000_000
+CHUNK_WORDS = 180
+CHUNK_OVERLAP = 40
+URL_PATTERN = re.compile(r"https?://[^\s<>\"]+", re.IGNORECASE)
+
 # Hàm lấy embeddings
 def get_embeddings(texts):
     try:
@@ -86,6 +98,175 @@ def get_embeddings(texts):
         return np.array(result)
     except Exception as e:
         raise Exception(f"Hugging Face API error: {str(e)}")
+
+class WebPageParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.title = ""
+        self._in_title = False
+        self._skip_depth = 0
+        self.text_parts = []
+        self.links = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style", "noscript", "svg"}:
+            self._skip_depth += 1
+        if tag == "title":
+            self._in_title = True
+        if tag == "a":
+            href = dict(attrs).get("href")
+            if href:
+                self.links.append(href)
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style", "noscript", "svg"} and self._skip_depth:
+            self._skip_depth -= 1
+        if tag == "title":
+            self._in_title = False
+        if tag in {"p", "br", "li", "h1", "h2", "h3", "h4", "section", "article"}:
+            self.text_parts.append("\n")
+
+    def handle_data(self, data):
+        clean = " ".join(data.split())
+        if not clean:
+            return
+        if self._in_title:
+            self.title = f"{self.title} {clean}".strip()
+        if self._skip_depth == 0:
+            self.text_parts.append(clean)
+
+    def text(self):
+        return re.sub(r"\n\s*\n+", "\n", " ".join(self.text_parts)).strip()
+
+def is_public_http_url(url):
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False
+    try:
+        for result in socket.getaddrinfo(parsed.hostname, None):
+            ip = ipaddress.ip_address(result[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return False
+    except Exception:
+        return False
+    return True
+
+def normalize_url(url):
+    clean_url, _ = urldefrag(url.strip())
+    return clean_url.rstrip("/")
+
+def fetch_page(url):
+    if not is_public_http_url(url):
+        raise Exception("Only public http/https website URLs are supported.")
+    req = Request(
+        url,
+        headers={
+            "User-Agent": "RAG-Chatbot/1.0 (+https://laxustiss.github.io/RAG-Chatbot/)"
+        },
+    )
+    with urlopen(req, timeout=10) as response:
+        content_type = response.headers.get("Content-Type", "")
+        if "text/html" not in content_type:
+            raise Exception(f"Unsupported content type: {content_type or 'unknown'}")
+        raw = response.read(MAX_PAGE_BYTES + 1)
+    if len(raw) > MAX_PAGE_BYTES:
+        raw = raw[:MAX_PAGE_BYTES]
+    html = raw.decode("utf-8", errors="ignore")
+    parser = WebPageParser()
+    parser.feed(html)
+    return {
+        "url": url,
+        "title": parser.title or urlparse(url).netloc,
+        "text": parser.text(),
+        "links": parser.links,
+    }
+
+def same_site_link(base_url, href):
+    absolute = normalize_url(urljoin(base_url, href))
+    base = urlparse(base_url)
+    parsed = urlparse(absolute)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if parsed.netloc != base.netloc:
+        return None
+    return absolute
+
+def crawl_site(start_url, max_pages=MAX_SITE_PAGES):
+    start_url = normalize_url(start_url)
+    queue = [start_url]
+    seen = set()
+    pages = []
+
+    while queue and len(pages) < max_pages:
+        url = queue.pop(0)
+        if url in seen:
+            continue
+        seen.add(url)
+        try:
+            page = fetch_page(url)
+        except Exception as exc:
+            if not pages:
+                raise exc
+            continue
+        if len(page["text"].split()) >= 40:
+            pages.append(page)
+        for href in page["links"][:80]:
+            next_url = same_site_link(start_url, href)
+            if next_url and next_url not in seen and next_url not in queue:
+                queue.append(next_url)
+
+    if not pages:
+        raise Exception("I could not extract enough readable text from that website.")
+    return pages
+
+def chunk_text(text, words_per_chunk=CHUNK_WORDS, overlap=CHUNK_OVERLAP):
+    words = text.split()
+    chunks = []
+    step = max(1, words_per_chunk - overlap)
+    for start in range(0, len(words), step):
+        chunk = " ".join(words[start:start + words_per_chunk]).strip()
+        if len(chunk.split()) >= 35:
+            chunks.append(chunk)
+    return chunks
+
+def build_website_context(url):
+    pages = crawl_site(url)
+    chunks = []
+    for page in pages:
+        for index, chunk in enumerate(chunk_text(page["text"])):
+            chunks.append({
+                "text": chunk,
+                "source_url": page["url"],
+                "title": page["title"],
+                "chunk_index": index,
+            })
+            if len(chunks) >= MAX_SITE_CHUNKS:
+                break
+        if len(chunks) >= MAX_SITE_CHUNKS:
+            break
+
+    embeddings = get_embeddings([chunk["text"] for chunk in chunks]).astype("float32")
+    index = faiss.IndexFlatL2(embeddings.shape[1])
+    index.add(embeddings)
+    return {
+        "root_url": normalize_url(url),
+        "pages": len(pages),
+        "chunks": chunks,
+        "index": index,
+    }
+
+def retrieve_website_docs(username, query, top_k=4):
+    with state_lock:
+        site_context = sessions.get(username, {}).get("site_context")
+    if not site_context:
+        return []
+    query_embedding = get_embeddings([query]).astype("float32")
+    distances, indices = site_context["index"].search(query_embedding, top_k)
+    results = []
+    for idx in indices[0]:
+        if 0 <= idx < len(site_context["chunks"]):
+            results.append(site_context["chunks"][idx])
+    return results
 
 # Khởi tạo FAISS index
 def initialize_index(username=None):
@@ -220,7 +401,12 @@ def generate_response(username, query):
             return "Session expired, please enter your name again!"
         convo = sessions[username]["convo"]
     retrieved_docs = retrieve_docs(query, top_k=3)
-    context = "\n".join(retrieved_docs)
+    profile_context = "\n".join(retrieved_docs)
+    website_docs = retrieve_website_docs(username, query, top_k=4)
+    website_context = "\n".join([
+        f"[Source {index + 1}] {doc['title']} - {doc['source_url']}\n{doc['text']}"
+        for index, doc in enumerate(website_docs)
+    ])
     
     convo.append({"role": "user", "parts": [{"text": query}]})
     
@@ -235,7 +421,8 @@ def generate_response(username, query):
         elif role == "system":
             prompt += f"system: {text}\n"
     prompt += (
-        f"Additional information about Laxus TT consider it as his memory about him and {username}. Ignore if this context is irrelevant: {context}\n"
+        f"Profile memory about Laxus TT and {username}. Ignore if irrelevant: {profile_context}\n"
+        f"Website context selected by the user. If you use it, mention the source URL naturally in your answer:\n{website_context or 'No website context loaded.'}\n"
         f"Now, respond to the {username}'s question: {query}"
     )
 
@@ -270,11 +457,41 @@ def rag_endpoint():
             session_event.set()
 
     try:
+        urls = URL_PATTERN.findall(query)
+        if urls:
+            site_url = urls[0].rstrip(".,)")
+            site_context = build_website_context(site_url)
+            with state_lock:
+                if username in sessions:
+                    sessions[username]["site_context"] = site_context
+                    sessions[username]["last_active"] = datetime.now()
+                    sessions[username]["convo"].append({"role": "user", "parts": [{"text": query}]})
+                    reply = (
+                        f"I scanned {site_context['pages']} page(s) from {site_context['root_url']} "
+                        f"and saved {len(site_context['chunks'])} chunks as website context. "
+                        "Ask me about that site now, and I will answer with source links."
+                    )
+                    sessions[username]["convo"].append({"role": "assistant", "parts": [{"text": reply}]})
+            return jsonify({
+                "query": query,
+                "response": reply,
+                "site": {
+                    "root_url": site_context["root_url"],
+                    "pages": site_context["pages"],
+                    "chunks": len(site_context["chunks"]),
+                },
+                "session_id": username
+            })
+
         response = generate_response(username, query)
         return jsonify({
             "query": query,
             "response": response,
             "retrieved_docs": retrieve_docs(query, top_k=1),
+            "website_sources": [
+                {"title": doc["title"], "url": doc["source_url"]}
+                for doc in retrieve_website_docs(username, query, top_k=2)
+            ],
             "session_id": username
         })
     except Exception as e:

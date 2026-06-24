@@ -227,6 +227,30 @@ const triggerRandomChat = async () => {
         });
         setStreamingText("");
         setIsStreaming(false);
+      } else if (dmTagMatch) {
+        const dmMessage = dmTagMatch[1].trim();
+        const response = await fetch(`${BACKEND_URL}/dm`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, message: dmMessage }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || `Direct message failed (${response.status})`);
+        }
+
+        const botReply = data.response || "Direct message sent to Laxus.";
+        setConvo((prev) => [
+          ...prev.slice(0, -1),
+          { role: "assistant", parts: [{ text: "" }] },
+        ]);
+        setStreamingText("");
+        setIsStreaming(true);
+        streamResponse(botReply);
+
+        if (toggleMode === "subtitle") startSubtitleAnimation(botReply);
       } else if (changeFontMatch) {
         const fontList = availableFonts
           .map((font, index) => `${index + 1}. ${fontOptions[font].label}`)

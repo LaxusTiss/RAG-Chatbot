@@ -135,7 +135,7 @@ function App() {
       {!username && (
         <div className="fixed inset-0 flex justify-center items-center z-50 bg-transparent">
           <div className="bg-transparent p-6 rounded-lg border-2 border-white/50 w-[300px]">
-            <h2 className="text-xl font-handwritten mb-4 text-white">Anoo's AI</h2>
+            <h2 className="text-xl font-handwritten mb-4 text-white">Laxus's AI</h2>
             <input
               type="text"
               value={tempUsername}

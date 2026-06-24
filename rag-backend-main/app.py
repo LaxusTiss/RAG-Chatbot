@@ -41,6 +41,7 @@ CORS(app)
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["Laxus_DB"]
 documents_collection = db["documents"]
+direct_messages_collection = db["direct_messages"]
 
 # Khởi tạo model và client
 genai_model = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=GEMINI_API_KEY)
@@ -49,25 +50,27 @@ client = InferenceClient(api_key=HF_API_TOKEN)
 # Dữ liệu mẫu
 doc_texts = [
 "your name, who, called = Laxus TT",  
-"age, how old, birth year = 20",  
-"where, location, country = Lam Dong, Vietnam",  
-"hobby, interests, like to do = sing, code, talk, photograph",  
+"age, how old, birth year = 21",  
+"where, location, country = Da Lat, Lam Dong, Vietnam",  
+"hobby, interests, like to do = sport, code, talk, photograph",
+"sport = football, pickleball, badminton ",  
 "job, work, profession, study = CS",  
 "university, school, education = HCMUIT",  
-"favorite food, like to eat = Cơm tấm",  
-"favorite color, color you like = yellow and blue",  
+"favorite food, like to eat = Com tam, Mother's meal",  
+"favorite color, color you like = orange ",  
 "language, speak, talk = English, Vietnamese",  
 "pet, animal, have pet = dont have",  
-"music, favorite song, like to listen = Tan Gai 101, Cat keo tren Lenin, Em gai, FLy me to the moon",  
+"music, favorite song, like to listen = Thoi em dung di, Tron tim, 7 years, Bad liar",  
 "book, favorite book, like to read = The Story Of A Seagull And The Cat Who Taught Her To Fly Book by Luis Sepúlveda",  
-"movie, film, favorite movie = Princess of Mononoke, Quintessential Quintuplets",  
-"anime, cartoon, favorite anime = Conan, Doraemon, ",  
-"goal, dream, future plan = inventor",  
-"relationship, girlfriend, love life = have 100 girlfriends",  
+"movie, film, favorite movie, favortie show = High Kick , Running man 7012",  
+"anime, cartoon, favorite anime = Fairy Tail, Doraemon, ",  
+"goal, dream, future plan = live wholehearted",  
+"relationship, girlfriend, love life = error found",  
 "programming, coding, language you use = python, C++",  
 "ai, machine learning, neural network = learning",  
 "exercise, workout, fitness = sport",  
-"game, video game, play = LOL",  
+"game, video game, play = LOL, PUBG",  
+"idol, favorite singer = Cristiano Ronaldo, myself"
 
 ]
 
@@ -496,6 +499,32 @@ def rag_endpoint():
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# API endpoint POST /dm
+@app.route('/dm', methods=['POST'])
+def dm_endpoint():
+    data = request.get_json(silent=True) or {}
+    username = data.get('username', '').strip()
+    message = data.get('message', '').strip()
+
+    if not username or not message:
+        return jsonify({"error": "Username and message are required!"}), 400
+
+    if len(message) > 2000:
+        return jsonify({"error": "Direct message is too long. Keep it under 2000 characters."}), 400
+
+    direct_messages_collection.insert_one({
+        "username": username,
+        "message": message,
+        "created_at": datetime.now(),
+        "status": "unread",
+        "source": "web"
+    })
+
+    return jsonify({
+        "ok": True,
+        "response": "Direct message sent to Laxus. I will keep it safe in the inbox."
+    })
 
 # API endpoint GET /status
 @app.route('/status', methods=['GET'])

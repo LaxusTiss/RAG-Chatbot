@@ -17,8 +17,10 @@ from urllib.parse import urljoin, urlparse, urldefrag
 from urllib.request import Request, urlopen
 import ipaddress
 import socket
+from pypdf import PdfReader
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(BASE_DIR)
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 def print_memory(stage):
@@ -90,6 +92,17 @@ MAX_PAGE_BYTES = 1_000_000
 CHUNK_WORDS = 180
 CHUNK_OVERLAP = 40
 URL_PATTERN = re.compile(r"https?://[^\s<>\"]+", re.IGNORECASE)
+
+# Tài liệu kiến thức mặc định cho trợ lý. Có thể đổi sang một tệp khác bằng
+# biến môi trường COOKING_PDF_PATH (đường dẫn tuyệt đối hoặc tương đối backend).
+COOKING_PDF_PATH = os.environ.get(
+    "COOKING_PDF_PATH",
+    os.path.join(PROJECT_DIR, "huong_dan_ky_thuat_nau_an_co_ban.pdf"),
+)
+PDF_CHUNK_WORDS = 220
+PDF_CHUNK_OVERLAP = 45
+cooking_pdf_context = None
+cooking_pdf_lock = threading.Lock()
 
 # Hàm lấy embeddings
 def get_embeddings(texts):
@@ -231,6 +244,62 @@ def chunk_text(text, words_per_chunk=CHUNK_WORDS, overlap=CHUNK_OVERLAP):
         if len(chunk.split()) >= 35:
             chunks.append(chunk)
     return chunks
+
+def build_cooking_pdf_context():
+    """Đọc PDF, tách theo trang để câu trả lời có thể dẫn nguồn chính xác."""
+    pdf_path = COOKING_PDF_PATH
+    if not os.path.isabs(pdf_path):
+        pdf_path = os.path.join(BASE_DIR, pdf_path)
+    if not os.path.isfile(pdf_path):
+        raise FileNotFoundError(
+            f"Không tìm thấy PDF hướng dẫn nấu ăn tại: {pdf_path}. "
+            "Hãy đặt tệp vào thư mục dự án hoặc đặt COOKING_PDF_PATH."
+        )
+
+    reader = PdfReader(pdf_path)
+    chunks = []
+    for page_number, page in enumerate(reader.pages, start=1):
+        page_text = re.sub(r"\s+", " ", page.extract_text() or "").strip()
+        if not page_text:
+            continue
+        for chunk_index, text in enumerate(
+            chunk_text(page_text, PDF_CHUNK_WORDS, PDF_CHUNK_OVERLAP)
+        ):
+            chunks.append({
+                "text": text,
+                "page": page_number,
+                "chunk_index": chunk_index,
+                "source_name": os.path.basename(pdf_path),
+            })
+
+    if not chunks:
+        raise ValueError("PDF không có nội dung văn bản có thể đọc được.")
+    embeddings = get_embeddings([chunk["text"] for chunk in chunks]).astype("float32")
+    index = faiss.IndexFlatL2(embeddings.shape[1])
+    index.add(embeddings)
+    return {"path": pdf_path, "pages": len(reader.pages), "chunks": chunks, "index": index}
+
+def get_cooking_pdf_context():
+    """Khởi tạo chỉ mục PDF một lần, khi có câu hỏi đầu tiên."""
+    global cooking_pdf_context
+    with cooking_pdf_lock:
+        if cooking_pdf_context is None:
+            cooking_pdf_context = build_cooking_pdf_context()
+            print(
+                f"Loaded cooking PDF: {cooking_pdf_context['pages']} pages, "
+                f"{len(cooking_pdf_context['chunks'])} chunks"
+            )
+        return cooking_pdf_context
+
+def retrieve_cooking_pdf_docs(query, top_k=4):
+    context = get_cooking_pdf_context()
+    query_embedding = get_embeddings([query]).astype("float32")
+    _, indices = context["index"].search(query_embedding, min(top_k, len(context["chunks"])))
+    return [
+        context["chunks"][idx]
+        for idx in indices[0]
+        if 0 <= idx < len(context["chunks"])
+    ]
 
 def build_website_context(url):
     pages = crawl_site(url)
@@ -401,7 +470,7 @@ def retrieve_docs(query, top_k=1):
 def generate_response(username, query):
     with state_lock:
         if username not in sessions:
-            return "Session expired, please enter your name again!"
+            return "Session expired, please enter your name again!", []
         convo = sessions[username]["convo"]
     retrieved_docs = retrieve_docs(query, top_k=3)
     profile_context = "\n".join(retrieved_docs)
@@ -409,6 +478,11 @@ def generate_response(username, query):
     website_context = "\n".join([
         f"[Source {index + 1}] {doc['title']} - {doc['source_url']}\n{doc['text']}"
         for index, doc in enumerate(website_docs)
+    ])
+    cooking_docs = retrieve_cooking_pdf_docs(query, top_k=4)
+    cooking_context = "\n\n".join([
+        f"[PDF trang {doc['page']}]\n{doc['text']}"
+        for doc in cooking_docs
     ])
     
     convo.append({"role": "user", "parts": [{"text": query}]})
@@ -425,6 +499,11 @@ def generate_response(username, query):
             prompt += f"system: {text}\n"
     prompt += (
         f"Profile memory about Laxus TT and {username}. Ignore if irrelevant: {profile_context}\n"
+        "Cooking technical guide (retrieved excerpts):\n"
+        f"{cooking_context}\n"
+        "For any cooking or food-technique question, answer ONLY from the cooking guide excerpts. "
+        "If the excerpts do not support the answer, clearly say the guide does not contain enough information. "
+        "When using the guide, cite the relevant page naturally in this exact form: (PDF trang N).\n"
         f"Website context selected by the user. If you use it, mention the source URL naturally in your answer:\n{website_context or 'No website context loaded.'}\n"
         f"Now, respond to the {username}'s question: {query}"
     )
@@ -434,7 +513,7 @@ def generate_response(username, query):
         if username in sessions:
             convo.append({"role": "assistant", "parts": [{"text": response}]})
             sessions[username]["last_active"] = datetime.now()
-    return response
+    return response, cooking_docs
 
 # API endpoint POST /rag
 @app.route('/rag', methods=['POST'])
@@ -486,7 +565,7 @@ def rag_endpoint():
                 "session_id": username
             })
 
-        response = generate_response(username, query)
+        response, cooking_docs = generate_response(username, query)
         return jsonify({
             "query": query,
             "response": response,
@@ -494,6 +573,14 @@ def rag_endpoint():
             "website_sources": [
                 {"title": doc["title"], "url": doc["source_url"]}
                 for doc in retrieve_website_docs(username, query, top_k=2)
+            ],
+            "pdf_sources": [
+                {
+                    "document": doc["source_name"],
+                    "page": doc["page"],
+                    "chunk": doc["chunk_index"],
+                }
+                for doc in cooking_docs
             ],
             "session_id": username
         })

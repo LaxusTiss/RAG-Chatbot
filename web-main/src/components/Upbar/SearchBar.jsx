@@ -26,7 +26,7 @@ const SearchBar = ({
         value={question}
         onChange={(e) => setQuestion(e.target.value)}
         onKeyPress={handleKeyPress}
-        placeholder="Ask Laxus anything!"
+        placeholder="Hỏi kỹ thuật nấu ăn từ PDF..."
         className="p-3 pl-4 pr-20 rounded-full text-white w-full bg-transparent ring-2 ring-white/50 hover:ring-white focus:outline-none focus:ring-2 focus:ring-white text-base font-handwritten placeholder-gray-400 transition-all duration-200"
         disabled={isSending}
       />

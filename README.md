@@ -8,6 +8,7 @@ A personalized chatbot web app with retrieval-augmented generation, user memory,
 | --- | --- |
 | Chat with memory | Stores user-specific summaries in MongoDB and retrieves them in later conversations. |
 | RAG retrieval | Uses Hugging Face embeddings and FAISS to retrieve relevant memory before generating an answer. |
+| Cooking-PDF RAG | Loads `huong_dan_ky_thuat_nau_an_co_ban.pdf`, extracts text by page, embeds chunks in FAISS, and cites relevant pages in cooking answers. |
 | Website context | Detects public website URLs in a message, crawls a small set of pages, embeds the content, and answers follow-up questions from that context. |
 | Direct message | Supports `@dm <message>` from the frontend and stores the message in MongoDB. |
 | React UI | Provides a Vite + React frontend with YouTube background, chat history, subtitle mode, and font switching. |
@@ -131,7 +132,8 @@ RAG-Chatbot/
 2. Start the Vite frontend.
 3. Open the frontend URL in your browser.
 4. Enter a username.
-5. Ask a normal question, send a command, or paste a public website URL for website-based RAG.
+5. Ask a cooking question, for example: `Làm sao để xào rau không bị ra nước?` The PDF is indexed automatically on the first question and answers cite sources such as `(PDF trang 3)`.
+6. You can also send a command or paste a public website URL for website-based RAG.
 
 Supported frontend commands:
 
@@ -189,6 +191,7 @@ Request body:
 ## Notes
 
 - `rag-backend-main/app.py` requires the three environment variables listed above. The app will fail to start if any are missing.
+- The default cooking PDF is `huong_dan_ky_thuat_nau_an_co_ban.pdf` in the repository root. To use a different PDF, set `COOKING_PDF_PATH` to its path.
 - The backend currently saves inactive sessions automatically after about 3 minutes.
 - Website RAG only accepts public `http` and `https` URLs. Private, local, loopback, and non-HTML URLs are rejected.
 - The frontend defaults to `http://localhost:5000` unless `VITE_API_URL` is configured.

@@ -52,7 +52,7 @@ const Upbar = ({ username }) => {
   };
   const availableFonts = Object.keys(fontOptions);
 
-  const welcomeMessage = `Welcome! This is Laxus’s AI — designed with memory and zero filters. It remembers your words, so feel free to talk like you're chatting with the easygoing side of me. \n\nSend a direct message to me by typing @dm <your message>\n\nLoad a website for RAG by typing @site <website url>`;
+  const welcomeMessage = `Welcome! This is Laxus’s AI — designed with memory and zero filters. It remembers your words, so feel free to talk like you're chatting with the easygoing side of me. \n\nThe cooking-techniques PDF is already loaded. Ask a cooking question and I will cite the relevant PDF page.\n\nSend a direct message to me by typing @dm <your message>\n\nPaste a public website URL to load it as extra RAG context.`;
 
 // Counter to limit random prompts
 const randomPromptCountRef = useRef(0);

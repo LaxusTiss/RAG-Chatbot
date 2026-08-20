@@ -16,16 +16,16 @@ function App() {
       playerInstance.current = new window.YT.Player(playerRef.current, {
         height: "1080",
         width: "1920",
+        videoId: "UbhxtQybTFo",
         playerVars: {
-          listType: "playlist",
-          list: "RDJgDNFQ2RaLQ",
           autoplay: 1,
           mute: 1,
           controls: 0,
           showinfo: 0,
           rel: 0,
           loop: 1,
-          setShuffle: 1,
+          // YouTube requires playlist to repeat one standalone video.
+          playlist: "UbhxtQybTFo",
         },
         events: {
           onReady: onPlayerReady,
@@ -73,7 +73,6 @@ function App() {
 
   const onPlayerReady = (event) => {
     const player = event.target;
-    player.setShuffle(true);
     player.playVideo();
   };
 
